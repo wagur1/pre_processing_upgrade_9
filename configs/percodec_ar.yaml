@@ -32,7 +32,8 @@ model:
 
 codec:
   kind: ste               # TRAIN THROUGH THE REAL CODECS from the start
-  ste_codec: h265         # default; the engine samples/overrides per plan below
+  ste_codec: h265         # initial; alternated per step by ste_alternate
+  ste_alternate: true     # v9: each step sees x264 OR x265 (never one-sided)
   qualities: [1, 2, 3, 5, 8]
   block: 8
   inter: true

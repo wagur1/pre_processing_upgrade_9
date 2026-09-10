@@ -215,6 +215,10 @@ def _build_models(cfg: dict, device: torch.device, role: str = "train"):
             quality_to_qp=q2qp,
             preset=cc.get("ste_preset", "medium"),
         )
+        if cc.get("ste_alternate", False):
+            # v9 per-codec POST: each training step flips the REAL codec so
+            # the codec-conditioned restorer sees both artifact families.
+            codec.alternate = True
     else:
         codec = proxy
     analyzer = build_analyzer(cfg, role=role).to(device)
@@ -502,6 +506,12 @@ def _fit(cfg, pre, codec, analyzer, train_loader, val_loader, prep_batch,
             step_w = replace(weights, beta=weights.beta * warm,
                              gamma=weights.gamma * warm, delta=weights.delta * warm)
             qp = random.choice(qp_list)
+            # v9 per-codec: alternate the REAL codec each step so the
+            # codec-conditioned POST sees BOTH artifact families (a single
+            # codec would drift the shared trunk and leave the other
+            # codec embedding untrained — the E1 trade-off).
+            if getattr(codec, "alternate", False):
+                codec.codec = random.choice(("h264", "h265"))
             q = qp_to_quality[qp]
             cond = _rate_cond(_qp_norm(qp, cfg), clips.shape[0], clips.device, clips.dtype)
             # A2: keep the sampled teacher fixed for saliency, task loss, and
