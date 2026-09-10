@@ -27,11 +27,12 @@ def main():
     v1 = torch.load(a.v1, map_location="cpu")
     ste = torch.load(a.ste, map_location="cpu")
 
-    # PRE <- v1
-    m.load_pre_state(v1["model"] if "model" in v1 else v1)
-    # trunk <- v8 STE (percodec's load_v8_sandwich copies matching keys)
+    # ORDER MATTERS: load_v8_sandwich copies pre.* too (the STE run's PRE),
+    # so it must run FIRST — then v1's PRE overwrites it as the final word.
     rep = m.load_v8_sandwich(ste["model"] if "model" in ste else ste)
-    print("warm-start report:", rep)
+    m.load_pre_state(v1["model"] if "model" in v1 else v1)
+    print("warm-start report (trunk from STE):", rep)
+    print("PRE (final word) from v1")
 
     ck = {"model": m.state_dict(), "opt": None, "sched": None,
           "cfg": ste.get("cfg", {}), "epoch": 0, "global_step": 0,
