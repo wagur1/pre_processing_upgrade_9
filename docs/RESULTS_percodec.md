@@ -70,7 +70,20 @@ STE (−3.56, trong dung sai ±1pp). Gap rule PASS cả hai codec.
 kỷ lục STE (−3.56) — cùng một checkpoint, P(BD<0)=1.000 cả hai codec, gap PASS.
 Số partial (−6.96/−3.33 trên 770 seqs) là sampling noise; full-n là chuẩn.
 
-**Kết luận cuối chiến dịch**: v9-b = cấu hình deployable tốt nhất — giữ đồng
-thời cả hai kỷ lục codec trong một hệ thống (per-codec PRE + POST routing).
+### CI ĐÃ SỬA (bootstrap multiplicity — audit #1) — số hợp lệ cuối cùng
+
+| Arm | BD h264 | CI95 (hợp lệ) | BD h265 | CI95 (hợp lệ) |
+|---|---|---|---|---|
+| sandwich | −5.89% | [−8.54, −3.09] | −3.56% | [−5.39, −1.62] |
+
+(CI pre-fix [−7.93,−3.76]/[−4.96,−2.09] giữ làm historical record — sai vì
+dedup ~63% clip/resample.) Đối đầu E4 (bootstrap hợp lệ, full-n): h264 v9-b
+thắng nhẹ (−5.89 vs −5.71, noise), h265 E4 thắng (−4.22 vs −3.56) — CI chồng
+lấn: hai kiến trúc (per-codec specialization vs shared-capacity) ngang tầm,
+mỗi bên thắng một codec.
+
+**Kết luận cuối chiến dịch (sửa)**: v9-b và E4 chia ngôi theo codec trong
+một hệ thống deployable — v9-b = router theo codec, E4 = một head lớn.
+v9-b giữ đồng thời cả hai kỷ lục codec riêng của từng cấu hình đơn.
 Bảng 3 tầng: sharing thất bại (v9-a −1.76) < ghép modul đơn codec (E2 −5.89) <
 per-codec union (v9-b −5.88/−3.53, cả hai codec cùng lúc).
