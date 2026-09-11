@@ -46,7 +46,17 @@ E2 (−5.89) thêm 1.07pp — per-codec PRE routing (PRE-v1 cho x264, STE-PRE ch
 x265) cộng hưởng với POST thay vì chỉ cộng từng phần. h265 −3.33 giữ gần kỷ lục
 STE (−3.56, trong dung sai ±1pp). Gap rule PASS cả hai codec.
 
-Đây là cấu hình tốt nhất toàn chiến dịch trong MỘT hệ thống deployable:
-encoder/decoder biết codec mình dùng → exact switch là conditioning trung thực.
-Bảng 3 tầng giờ hoàn chỉnh: sharing thất bại (v9-a −1.76) < ghép modul (E2
-−5.89) < per-codec union (v9-b −6.96/−3.33). Full n=1159 merge khi shard 2 xong.
+### FULL n=1159 (10k bootstrap) — SỐ CHỐT
+
+| Arm | BD h264 | CI95 | BD h265 | CI95 | P(BD<0) |
+|---|---|---|---|---|---|
+| **sandwich (full union)** | **−5.88%** | **[−7.93, −3.76]** | **−3.53%** | **[−4.96, −2.09]** | **1.000 / 1.000** |
+
+**Union chính xác theo cấu trúc**: h264 −5.88 ≈ kỷ lục E2 (−5.89), h265 −3.53 ≈
+kỷ lục STE (−3.56) — cùng một checkpoint, P(BD<0)=1.000 cả hai codec, gap PASS.
+Số partial (−6.96/−3.33 trên 770 seqs) là sampling noise; full-n là chuẩn.
+
+**Kết luận cuối chiến dịch**: v9-b = cấu hình deployable tốt nhất — giữ đồng
+thời cả hai kỷ lục codec trong một hệ thống (per-codec PRE + POST routing).
+Bảng 3 tầng: sharing thất bại (v9-a −1.76) < ghép modul đơn codec (E2 −5.89) <
+per-codec union (v9-b −5.88/−3.53, cả hai codec cùng lúc).
