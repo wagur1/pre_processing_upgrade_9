@@ -13,7 +13,22 @@
 
 → **Restorer phải BIẾT mình đang đảo artifact của codec nào.**
 
-## Kiến trúc (`src/models/percodec_sandwich.py`)
+## MÔ HÌNH CUỐI: v9-b DualCodecSandwich (`src/models/dualpost_sandwich.py`)
+
+```
+codec=h264: x ─► PRE_264 (UP-VCM v1) ─► x264 ─► decode ─► POST_264 ─► analyzer
+codec=h265: x ─► PRE_265 (v8-STE PRE) ─► x265 ─► decode ─► POST_265 ─► analyzer
+```
+Hai pipeline chuyên biệt theo codec (hard switch — encoder/decoder biết codec
+mình dùng). Assemble bằng `python ops/make_v9_ckpt.py dual <v1> <e2> <ste> <out>`
+(arch `dualcodec`). Kết quả full n=1159: **h264 −5.88% [−7.93,−3.76] /
+h265 −3.53% [−4.96,−2.09]**, P(BD<0)=1.000 cả hai codec (CI pre-bootstrap-fix;
+bản sửa lỗi multiplicity xem RESULTS_percodec.md).
+
+(v9-a PerCodecPostSandwich — shared trunk + codec FiLM — là **negative result**,
+giữ làm ablation: −1.76/−2.90.)
+
+## Kiến trúc v9-a (negative result) (`src/models/percodec_sandwich.py`)
 
 ```
 x ─► PRE (UP-VCM) ─► x264/x265 (đóng băng) ─► decode ─► POST(·, codec, QP) ─► analyzer

@@ -53,19 +53,26 @@ def main():
 
 
 def make_dual(v1_path, e2_path, ste_path, out_path):
-    """v9-b: PRE from v1, POST_264 from E2 (frankenstein-STE, h264 record),
-    POST_265 from the v8 STE run (h265 record)."""
+    """v9-b FINAL (audit 2026-09-11 finding #2): build the REPORTED model —
+    DualCodecSandwich with PER-CODEC PREs — not DualPostSandwich.
+
+      pre_264  <- v1 (v7 UP-VCM best, the E2 h264 record's PRE)
+      pre_265  <- ste (the v8 STE run's PRE, the h265 record's PRE)
+      post_264/post_265 <- ste's POST (the shared record holder; E2's POST
+                           and STE's POST are the same weights by lineage)
+    arch = "dualcodec" so eval rebuilds the right class.
+    """
     import torch
-    from src.models.dualpost_sandwich import DualPostSandwich
-    m = DualPostSandwich()
+    from src.models.dualpost_sandwich import DualCodecSandwich
+    m = DualCodecSandwich()
     v1 = torch.load(v1_path, map_location="cpu")
     e2 = torch.load(e2_path, map_location="cpu")
     ste = torch.load(ste_path, map_location="cpu")
-    rep = m.load_dual(v1["model"], e2["model"], ste["model"])
-    print("dual assembly:", rep)
-    cfg = dict(e2.get("cfg") or {})
+    rep = m.load_record_assembly(v1["model"], ste["model"])
+    print("dualcodec assembly:", rep)
+    cfg = dict(ste.get("cfg") or {})
     cfg["model"] = dict(cfg.get("model") or {})
-    cfg["model"]["arch"] = "dualpost"
+    cfg["model"]["arch"] = "dualcodec"
     cfg["model"]["post_base"] = 32
     ck = {"model": m.state_dict(), "opt": None, "sched": None, "cfg": cfg,
           "epoch": 0, "global_step": 0, "best_val": None, "no_improve": 0}
@@ -73,9 +80,12 @@ def make_dual(v1_path, e2_path, ste_path, out_path):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     torch.save(ck, out_path)
     ms = ck["model"]
-    print(f"saved {out_path}: PRE dec={ms['pre.dec_strength'].item():+.4f} "
-          f"| POST_264 strength={ms['post_strength_264'].item():+.4f} "
-          f"| POST_265 strength={ms['post_strength_265'].item():+.4f}")
+    print(f"saved {out_path}: PRE_264 dec={ms['pre_264.dec_strength'].item():+.4f} "
+          f"| PRE_265 dec={ms['pre_265.dec_strength'].item():+.4f} "
+          f"| POST_264={ms['post_strength_264'].item():+.4f} "
+          f"| POST_265={ms['post_strength_265'].item():+.4f}")
+    # e2_path stays an input for signature compatibility (its POST == ste's
+    # POST by lineage: E2 = frankenstein-STE); ste's copy is canonical.
 
 
 if __name__ == "__main__":
