@@ -1,8 +1,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-outputs/
-data/index/*.json
+*.pth
 ops/_push/*/notebook.ipynb
 ops/_push/*/kernel-metadata.json
-*.pth
+data/index/*.json
