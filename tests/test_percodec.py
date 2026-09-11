@@ -185,3 +185,30 @@ def test_dualcodec_routes_both_halves():
     # POST gates copied to both heads
     assert abs(m.post_strength_264.item() - 0.05) < 1e-6
     assert abs(m.post_strength_265.item() - 0.05) < 1e-6
+
+
+def test_warmstart_with_trained_film_is_not_exact():
+    """Audit 2026-09-11 #5: the OLD 'exact warm-start' test used a fresh v8
+    (FiLM zero) and proved nothing about trained checkpoints. With a trained
+    FiLM (non-zero final layer), load_v8_sandwich DROPS v8's learned affine —
+    diff ~1e-3, NOT exact. This test pins that truth so the docs can't drift
+    back to the overclaim."""
+    import torch as _t
+    from src.models.sandwich import SandwichPreprocessor
+    from src.models.percodec_sandwich import PerCodecPostSandwich
+    _t.manual_seed(0)
+    v8 = SandwichPreprocessor()
+    with _t.no_grad():
+        v8.post_net.out_conv.weight.normal_(0, 0.05)
+        v8.post_strength.fill_(0.3)
+        v8.post_net.film.net[2].weight.normal_(0, 0.05)  # trained FiLM
+        v8.post_net.film.net[2].bias.normal_(0, 0.05)
+    v9 = PerCodecPostSandwich()
+    v9.load_v8_sandwich(v8.state_dict())
+    x = _t.rand(1, 3, 4, 32, 32)
+    cond = _t.full((1, 1), 0.5)
+    with _t.no_grad():
+        d = (v8.post_restore(x, cond)
+             - v9.post_restore(x, cond, codec="h264")).abs().max().item()
+    assert d > 1e-5, "if this ever becomes exact, update RESULTS_percodec.md"
+    assert d < 0.01, "unexpectedly large — investigate the loader"

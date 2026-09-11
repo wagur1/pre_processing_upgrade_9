@@ -7,6 +7,20 @@
 | prep (PRE-v1) | −1.51% | [−3.88, +0.96] | −1.53% | [−3.38, +0.33] | 0.892 / 0.945 |
 | sandwich (per-codec POST) | −1.76% | [−4.30, +1.01] | −2.90% | [−4.70, −0.93] | 0.896 / 0.998 |
 
+## Sửa đúng theo audit 2026-09-11 (finding #5): warm-start KHÔNG exact
+
+Kiểm tra với FiLM đã train (net[2] non-zero, mô phỏng checkpoint thật):
+max diff giữa v8.post_restore và v9.post_restore(codec=h264) sau load =
+**0.0012 — KHÔNG phải exact**. `load_v8_sandwich` bỏ toàn bộ
+`post_net.film.*` của v8 (cond width 1→9 không tương thích), nên v9-a khởi
+đầu từ **v8-trừ-FiLM** chứ không phải v8. Kết luận "alternating STE phá
+specialization từ cùng warm-start" cần nới thành: **v9-a bắt đầu từ một điểm
+khởi tạo hơi khác v8 (mất affine đã học của FiLM) VÀ chịu alternating STE** —
+hai nhân tố trộn nhau, không thể quy hết cho STE. Kết quả âm của v9-a vẫn
+đúng về mặt đo lường; phân tích nguyên nhân bị hạ xuống "không chắc chắn".
+(Test cũ dùng v8 fresh-init với FiLM zero — không chứng minh được gì về
+checkpoint thật, đúng như audit chấm.)
+
 ## Verdict: KHÔNG giữ được kỷ lục nào (downside scenario ~25% đã đăng ký)
 
 - h264 −1.76 so với kỷ lục E2 **−5.89** (cùng warm-start!) — POST sau 1079 bước
