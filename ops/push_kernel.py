@@ -60,6 +60,8 @@ def main():
     p.add_argument("--num-shards", type=int, default=3)
     p.add_argument("--train-kernel", default=None,
                    help="(eval) train kernel slug whose output is the checkpoint source")
+    p.add_argument("--confirmatory", action="store_true",
+                   help="(eval) use the fresh never-used-sibling holdout (audit #4)")
     p.add_argument("--ckpt-dataset", default=None,
                    help="(eval) dataset slug holding the checkpoint (e.g. frankenstein)")
     p.add_argument("--no-gpu", action="store_true")
@@ -85,6 +87,8 @@ def main():
     elif a.kind == "eval":
         mod = importlib.import_module("ops.mk_eval_kernel")
         src = mod.EVAL_BASH.replace("__COMMIT__", commit)
+        if a.confirmatory:
+            src = "export CONFIRMATORY=1\n" + src
         src = src.replace("__CONFIG__", a.config)
         src = src.replace("__SHARD_ARGS__",
                           f"eval.shard_idx={a.shard_idx} eval.num_shards={a.num_shards}")
@@ -92,7 +96,7 @@ def main():
     else:
         src = PROBE_BASH.replace("__COMMIT__", commit)
 
-    slug = f"u9-{a.kind}{a.slug_suffix or ('-shard%d' % a.shard_idx if a.kind == 'eval' else '')}"
+    slug = f"u8-{a.kind}{a.slug_suffix or ('-shard%d' % a.shard_idx if a.kind == 'eval' else '')}"
     push_dir = REPO / "ops" / "_push" / slug
     push_dir.mkdir(parents=True, exist_ok=True)
 
@@ -143,7 +147,7 @@ PROBE_BASH = r"""%%bash
 set -euo pipefail
 export PYTHONUNBUFFERED=1
 cd /kaggle/working
-git clone -q https://github.com/wagur1/pre_processing_upgrade_9.git repo 2>/dev/null || (cd repo && git pull -q)
+git clone -q https://github.com/wagur1/pre_processing_upgrade_8.git repo 2>/dev/null || (cd repo && git pull -q)
 cd repo
 git checkout -q __COMMIT__
 pip install -q opencv-python-headless pyyaml tqdm scipy matplotlib pandas 2>/dev/null | tail -1 || true

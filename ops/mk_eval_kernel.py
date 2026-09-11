@@ -21,13 +21,13 @@ set -euo pipefail
 export PYTHONUNBUFFERED=1
 
 cd /kaggle/working
-REPO=/kaggle/working/pre_processing_upgrade_9
+REPO=/kaggle/working/pre_processing_upgrade_8
 
 if [ -d "$REPO/.git" ]; then
   git -C "$REPO" fetch --all -q
   git -C "$REPO" checkout -q __COMMIT__
 else
-  git clone -q https://github.com/wagur1/pre_processing_upgrade_9.git "$REPO"
+  git clone -q https://github.com/wagur1/pre_processing_upgrade_8.git "$REPO"
   git -C "$REPO" checkout -q __COMMIT__
 fi
 cd "$REPO"
@@ -45,19 +45,28 @@ if [ -z "$KINETICS_ROOT" ]; then
 fi
 echo "[eval] Kinetics root: $KINETICS_ROOT"
 
-INDEX=data/index/kinetics_hash_split.json
-if [ ! -f "$INDEX" ]; then
-  python scripts/build_train_index.py --root "$KINETICS_ROOT" --out "$INDEX" --assert-fingerprint 30f083f8520a
+if [ "${CONFIRMATORY:-0}" = "1" ]; then
+  # audit #4: fresh holdout from never-indexed sibling dirs
+  INDEX=data/index/confirmatory.json
+  python ops/build_confirmatory_index.py \
+      --canonical-root "$KINETICS_ROOT" \
+      --dataset-root "$(dirname "$KINETICS_ROOT")" \
+      --out "$INDEX"
+else
+  INDEX=data/index/kinetics_hash_split.json
+  if [ ! -f "$INDEX" ]; then
+    python scripts/build_train_index.py --root "$KINETICS_ROOT" --out "$INDEX" --assert-fingerprint 30f083f8520a
+  fi
 fi
 
 # ---- checkpoint from the TRAIN kernel's attached output ----
 # The train kernel's output = its whole /kaggle/working, so the checkpoint
-# lives at /kaggle/input/<train-slug>/pre_processing_upgrade_9/outputs/<run>/checkpoints/preprocessor.pth
+# lives at /kaggle/input/<train-slug>/pre_processing_upgrade_8/outputs/<run>/checkpoints/preprocessor.pth
 # Prefer the train-kernel output checkpoint (nested under outputs/); fall
 # back to any preprocessor.pth (e.g. frankenstein.pth renamed or a dataset copy).
 CKPT_SRC=$(find /kaggle/input -name 'preprocessor.pth' -path '*outputs*' 2>/dev/null | head -1 || true)
 if [ -z "$CKPT_SRC" ]; then
-  CKPT_SRC=$(find /kaggle/input \( -name 'v9b_dualcodec.pth' -o -name 'frankenstein_ste.pth' -o -name 'frankenstein.pth' -o -name 'preprocessor.pth' \) 2>/dev/null | head -1 || true)
+  CKPT_SRC=$(find /kaggle/input \( -name 'frankenstein_ste.pth' -o -name 'frankenstein.pth' -o -name 'preprocessor.pth' \) 2>/dev/null | head -1 || true)
 fi
 if [ -z "$CKPT_SRC" ]; then
   echo "ERROR: no preprocessor.pth in /kaggle/input (attach the train kernel's output as a data source)" >&2
