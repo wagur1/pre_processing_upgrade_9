@@ -64,10 +64,7 @@ fi
 # lives at /kaggle/input/<train-slug>/pre_processing_upgrade_9/outputs/<run>/checkpoints/preprocessor.pth
 # Prefer the train-kernel output checkpoint (nested under outputs/); fall
 # back to any preprocessor.pth (e.g. frankenstein.pth renamed or a dataset copy).
-CKPT_SRC=$(find /kaggle/input -name 'preprocessor.pth' -path '*outputs*' 2>/dev/null | head -1 || true)
-if [ -z "$CKPT_SRC" ]; then
-  CKPT_SRC=$(find /kaggle/input \( -name 'frankenstein_ste.pth' -o -name 'frankenstein.pth' -o -name 'preprocessor.pth' \) 2>/dev/null | head -1 || true)
-fi
+CKPT_SRC=$(find /kaggle/input \( -name 'v9b_dualcodec.pth' -o -name 'frankenstein_ste.pth' -o -name 'frankenstein.pth' -o -name 'preprocessor.pth' \) -not -path '*/pre_processing_upgrade_9/*' 2>/dev/null | head -1 || true)
 if [ -z "$CKPT_SRC" ]; then
   echo "ERROR: no preprocessor.pth in /kaggle/input (attach the train kernel's output as a data source)" >&2
   exit 1
