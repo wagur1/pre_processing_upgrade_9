@@ -32,3 +32,21 @@
 Best single model: **E2 frankenstein-STE — h264 −5.89% [−7.93,−3.76] /
 h265 −2.79% [−4.24,−1.25]** (full n=1159, P=1.000/1.000).
 Per-codec records: h264 E2 −5.89 / h265 STE-sandwich −3.56.
+
+
+## v9-b DUALCODEC — per-codec PRE + per-codec POST (shards 0+1 = 770/1159, 5k boot)
+
+| Arm | BD h264 | CI95 | BD h265 | CI95 | P(BD<0) |
+|---|---|---|---|---|---|
+| prep (per-codec PRE) | −2.66% | [−5.18, −0.21] | −1.36% | [−2.97, +0.31] | 0.982 / 0.943 |
+| **sandwich (full union)** | **−6.96%** | **[−9.44, −4.32]** | **−3.33%** | **[−5.04, −1.43]** | **1.000 / 1.000** |
+
+**VERDICT: union THÀNH CÔNG và VƯỢT kỳ vọng cấu trúc.** h264 −6.96 vượt kỷ lục
+E2 (−5.89) thêm 1.07pp — per-codec PRE routing (PRE-v1 cho x264, STE-PRE cho
+x265) cộng hưởng với POST thay vì chỉ cộng từng phần. h265 −3.33 giữ gần kỷ lục
+STE (−3.56, trong dung sai ±1pp). Gap rule PASS cả hai codec.
+
+Đây là cấu hình tốt nhất toàn chiến dịch trong MỘT hệ thống deployable:
+encoder/decoder biết codec mình dùng → exact switch là conditioning trung thực.
+Bảng 3 tầng giờ hoàn chỉnh: sharing thất bại (v9-a −1.76) < ghép modul (E2
+−5.89) < per-codec union (v9-b −6.96/−3.33). Full n=1159 merge khi shard 2 xong.
