@@ -21,13 +21,13 @@ set -euo pipefail
 export PYTHONUNBUFFERED=1
 
 cd /kaggle/working
-REPO=/kaggle/working/pre_processing_upgrade_8
+REPO=/kaggle/working/pre_processing_upgrade_9
 
 if [ -d "$REPO/.git" ]; then
   git -C "$REPO" fetch --all -q
   git -C "$REPO" checkout -q __COMMIT__
 else
-  git clone -q https://github.com/wagur1/pre_processing_upgrade_8.git "$REPO"
+  git clone -q https://github.com/wagur1/pre_processing_upgrade_9.git "$REPO"
   git -C "$REPO" checkout -q __COMMIT__
 fi
 cd "$REPO"
@@ -61,7 +61,7 @@ fi
 
 # ---- checkpoint from the TRAIN kernel's attached output ----
 # The train kernel's output = its whole /kaggle/working, so the checkpoint
-# lives at /kaggle/input/<train-slug>/pre_processing_upgrade_8/outputs/<run>/checkpoints/preprocessor.pth
+# lives at /kaggle/input/<train-slug>/pre_processing_upgrade_9/outputs/<run>/checkpoints/preprocessor.pth
 # Prefer the train-kernel output checkpoint (nested under outputs/); fall
 # back to any preprocessor.pth (e.g. frankenstein.pth renamed or a dataset copy).
 CKPT_SRC=$(find /kaggle/input -name 'preprocessor.pth' -path '*outputs*' 2>/dev/null | head -1 || true)
