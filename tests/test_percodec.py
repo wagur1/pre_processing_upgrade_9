@@ -105,3 +105,83 @@ if __name__ == "__main__":
             fn()
             print(f"PASS {name}")
     print("all v9 tests passed")
+
+
+def test_dualpost_independent_heads():
+    """v9-b: the two POST heads are independent — writing one must not touch
+    the other, and the codec switch routes to the right head."""
+    import torch as _t
+    from src.models.dualpost_sandwich import DualPostSandwich
+    _t.manual_seed(0)
+    m = DualPostSandwich()
+    x_hat = _t.rand(1, 3, 4, 32, 32)
+    cond = _t.zeros(1, 1)
+    # distinct gates
+    with _t.no_grad():
+        m.post_264.out_conv.weight.normal_(0, 0.05)
+        m.post_265.out_conv.weight.normal_(0, 0.07)  # different init
+        m.post_strength_264.fill_(0.5)
+        m.post_strength_265.fill_(0.5)
+        o264 = m.post_restore(x_hat, cond, codec="h264")
+        o265 = m.post_restore(x_hat, cond, codec="h265")
+    assert not _t.allclose(o264, o265, atol=1e-6)
+    # gradient isolation: loss on h264 arm reaches only post_264
+    m2 = DualPostSandwich()
+    out = m2.post_restore(x_hat, cond, codec="h264")
+    out.pow(2).mean().backward()
+    assert m2.post_264.out_conv.weight.grad is not None
+    assert m2.post_265.out_conv.weight.grad is None or m2.post_265.out_conv.weight.grad.abs().sum() == 0
+
+
+def test_dualpost_load_dual_and_identity():
+    import torch as _t
+    from src.models.dualpost_sandwich import DualPostSandwich
+    from src.models.upvcm import UPVCMPreprocessor
+    from src.models.sandwich import SandwichPreprocessor
+    _t.manual_seed(0)
+    m = DualPostSandwich()
+    v1 = UPVCMPreprocessor()
+    with _t.no_grad():
+        v1.dec_strength.fill_(-0.62)
+    sA, sB = SandwichPreprocessor(), SandwichPreprocessor()
+    with _t.no_grad():
+        sA.post_strength.fill_(0.11)
+        sB.post_strength.fill_(0.22)
+    rep = m.load_dual(v1.state_dict(), sA.state_dict(), sB.state_dict())
+    assert rep["post_264"] > 20 and rep["post_265"] > 20
+    assert abs(m.post_strength_264.item() - 0.11) < 1e-6
+    assert abs(m.post_strength_265.item() - 0.22) < 1e-6
+    assert abs(m.pre.dec_strength.item() + 0.62) < 1e-6
+    # fresh heads zero-gate => identity
+    m2 = DualPostSandwich()
+    xh = _t.rand(1, 3, 4, 32, 32)
+    assert _t.allclose(m2.post_restore(xh, None, codec="h264"), xh, atol=1e-6)
+
+
+def test_dualcodec_routes_both_halves():
+    """v9-b full: per-codec PRE AND POST — each codec path is independent."""
+    import torch as _t
+    from src.models.dualpost_sandwich import DualCodecSandwich
+    from src.models.upvcm import UPVCMPreprocessor
+    from src.models.sandwich import SandwichPreprocessor
+    _t.manual_seed(0)
+    m = DualCodecSandwich()
+    v1 = UPVCMPreprocessor()
+    ste = SandwichPreprocessor()
+    with _t.no_grad():
+        v1.dec_strength.fill_(-0.62)
+        ste.pre.dec_strength.fill_(-0.34)
+        ste.post_strength.fill_(0.05)
+    rep = m.load_record_assembly(v1.state_dict(), ste.state_dict())
+    assert rep["copied"] > 60
+    x = _t.rand(1, 3, 4, 32, 32)
+    with _t.no_grad():
+        p264 = m(x, None, codec="h264")
+        p265 = m(x, None, codec="h265")
+    # different PREs -> different preprocessed outputs (both non-identity)
+    assert not _t.allclose(p264, p265, atol=1e-6)
+    assert abs(m.pre_264.dec_strength.item() + 0.62) < 1e-6
+    assert abs(m.pre_265.dec_strength.item() + 0.34) < 1e-6
+    # POST gates copied to both heads
+    assert abs(m.post_strength_264.item() - 0.05) < 1e-6
+    assert abs(m.post_strength_265.item() - 0.05) < 1e-6

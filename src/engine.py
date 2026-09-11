@@ -59,6 +59,8 @@ from .models import (
     AdditivePreprocessor,
     CompressAICodec,
     STECodec,
+    DualCodecSandwich,
+    DualPostSandwich,
     PerCodecPostSandwich,
     SandwichPreprocessor,
     UPVCMPreprocessor,
@@ -123,6 +125,29 @@ def _build_models(cfg: dict, device: torch.device, role: str = "train"):
             motion_tau=float(m.get("motion_tau", 0.1)),
             post_base=int(m.get("post_base", 32)),
         ).to(device)
+    elif arch == "dualcodec":
+        # v9-b full: per-codec PRE + per-codec POST (the modular union).
+        pre = DualCodecSandwich(
+            s_ch=int(m.get("s_ch", 16)),
+            editor_ch=int(m.get("editor_ch", 24)),
+            cond_dim=int(m.get("cond_dim", 1)),
+            dino_weight=float(m.get("dino_weight", 0.5)),
+            dino_name=str(m.get("dino_name", "dinov2_vits14")),
+            motion_tau=float(m.get("motion_tau", 0.1)),
+            post_base=int(m.get("post_base", 32)),
+        ).to(device)
+    elif arch == "dualpost":
+        # v9-b (docs/MODEL_PERCODEC.md): TWO independent POST UNets, exact
+        # codec switch. No shared trunk, no embedding — the anti-v9a design.
+        pre = DualPostSandwich(
+            s_ch=int(m.get("s_ch", 16)),
+            editor_ch=int(m.get("editor_ch", 24)),
+            cond_dim=int(m.get("cond_dim", 1)),
+            dino_weight=float(m.get("dino_weight", 0.5)),
+            dino_name=str(m.get("dino_name", "dinov2_vits14")),
+            motion_tau=float(m.get("motion_tau", 0.1)),
+            post_base=int(m.get("post_base", 32)),
+        ).to(device)
     elif arch == "percodec_sandwich":
         # v9 (docs/MODEL_PERCODEC.md): UP-VCM PRE + codec-conditioned POST.
         # Same interface as sandwich; post_restore(codec=...) routes FiLM.
@@ -160,7 +185,7 @@ def _build_models(cfg: dict, device: torch.device, role: str = "train"):
             edit_kind=str(m.get("edit_kind", "residual")),
         ).to(device)
     else:
-        raise ValueError(f"model.arch must be 'unet', 'additive', 'additive_cond', 'upvcm', 'sandwich' or 'percodec_sandwich', got {arch!r}")
+        raise ValueError(f"model.arch must be 'unet', 'additive', 'additive_cond', 'upvcm', 'sandwich', 'percodec_sandwich', 'dualpost' or 'dualcodec', got {arch!r}")
     cc = cfg["codec"]
     kind = cc.get("kind", "compressai")
     if kind == "entropy":
@@ -356,7 +381,10 @@ def _val_loss(pre, codec, analyzer, loader, weights, qp_list, qp_to_quality,
                 analyzer.pin_active()
             try:
                 mask = task_saliency(analyzer, clips, target) if weights.use_task_mask else None
-                x_pre = pre(clips, cond, mask=mask)
+                if "codec" in pre.forward.__code__.co_varnames:
+                    x_pre = pre(clips, cond, mask=mask, codec=_ste_codec_name(codec))
+                else:
+                    x_pre = pre(clips, cond, mask=mask)
                 x_hat, bpp = codec(x_pre, q)
                 if hasattr(pre, "post_restore"):
                     _codec_name = _ste_codec_name(codec)
@@ -521,7 +549,10 @@ def _fit(cfg, pre, codec, analyzer, train_loader, val_loader, prep_batch,
                 analyzer.pin_active()
             try:
                 mask = task_saliency(analyzer, clips, target) if weights.use_task_mask else None
-                x_pre = pre(clips, cond, mask=mask)
+                if "codec" in pre.forward.__code__.co_varnames:
+                    x_pre = pre(clips, cond, mask=mask, codec=_ste_codec_name(codec))
+                else:
+                    x_pre = pre(clips, cond, mask=mask)
                 x_hat, bpp = codec(x_pre, q)
                 if hasattr(pre, "post_restore"):
                     _codec_name = _ste_codec_name(codec)
@@ -847,7 +878,11 @@ def _evaluate_classification(cfg, pre, codec, analyzer, out_dir) -> dict:
                 for qp in qps:
                     cond = _rate_cond(_qp_norm(qp, cfg), clips.shape[0], clips.device, clips.dtype)
                     with torch.no_grad():
-                        x_pre = pre(clips, cond, mask=gate_mask)
+                        # v9-b dualcodec: per-codec PRE (encoder knows its codec)
+                        if "codec" in pre.forward.__code__.co_varnames:
+                            x_pre = pre(clips, cond, mask=gate_mask, codec=name)
+                        else:
+                            x_pre = pre(clips, cond, mask=gate_mask)
                     sc = StandardCodec(codec=name, qp=qp, preset=ev.get("preset", "medium"))
                     xh, bpps = sc.compress_decompress_items(clips)
                     xhp, bppps = sc.compress_decompress_items(x_pre)
