@@ -88,7 +88,10 @@ def main():
         mod = importlib.import_module("ops.mk_eval_kernel")
         src = mod.EVAL_BASH.replace("__COMMIT__", commit)
         if a.confirmatory:
-            src = "export CONFIRMATORY=1\n" + src
+            # must go INSIDE the bash cell (after %%bash) — prefixing before
+            # the %%bash magic makes papermill run bash as python: SyntaxError
+            src = src.replace("%%bash\nset -euo pipefail",
+                              "%%bash\nset -euo pipefail\nexport CONFIRMATORY=1", 1)
         src = src.replace("__CONFIG__", a.config)
         src = src.replace("__SHARD_ARGS__",
                           f"eval.shard_idx={a.shard_idx} eval.num_shards={a.num_shards}")
