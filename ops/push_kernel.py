@@ -65,6 +65,10 @@ def main():
     p.add_argument("--ckpt-dataset", default=None,
                    help="(eval) dataset slug holding the checkpoint (e.g. frankenstein)")
     p.add_argument("--no-gpu", action="store_true")
+    p.add_argument("--analyzer", choices=["heldout", "teacher"], default="heldout",
+                   help="(eval) heldout: r2plus1d_18 canonical; teacher: "
+                        "eval.held_out_backbone=null -> task.backbone (on-teacher arm; "
+                        "the YAML value must be nulled, omitting the override is not enough)")
     p.add_argument("--accelerator", default=None,
                    help="e.g. NvidiaTeslaT4 (P100 sm_60 is INCOMPATIBLE with "
                         "Kaggle's preinstalled torch: no kernel image)")
@@ -96,10 +100,11 @@ def main():
         src = src.replace("__SHARD_ARGS__",
                           f"eval.shard_idx={a.shard_idx} eval.num_shards={a.num_shards}")
         src = src.replace("__SUFFIX__", f"shard{a.shard_idx}")
+        src = src.replace("__HELD_OUT__", mod.held_out_override(a.analyzer))
     else:
         src = PROBE_BASH.replace("__COMMIT__", commit)
 
-    slug = f"u8-{a.kind}{a.slug_suffix or ('-shard%d' % a.shard_idx if a.kind == 'eval' else '')}"
+    slug = f"u9-{a.kind}{a.slug_suffix or ('-shard%d' % a.shard_idx if a.kind == 'eval' else '')}"
     push_dir = REPO / "ops" / "_push" / slug
     push_dir.mkdir(parents=True, exist_ok=True)
 
