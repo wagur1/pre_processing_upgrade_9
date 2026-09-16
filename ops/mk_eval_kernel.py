@@ -60,11 +60,28 @@ else
 fi
 
 # ---- checkpoint from the TRAIN kernel's attached output ----
-# The train kernel's output = its whole /kaggle/working, so the checkpoint
+# The train kernel's output = its whole /kaggle/working, so its checkpoint
 # lives at /kaggle/input/<train-slug>/pre_processing_upgrade_9/outputs/<run>/checkpoints/preprocessor.pth
-# Prefer the train-kernel output checkpoint (nested under outputs/); fall
-# back to any preprocessor.pth (e.g. frankenstein.pth renamed or a dataset copy).
-CKPT_SRC=$(find /kaggle/input \( -name 'v9b_dualcodec.pth' -o -name 'frankenstein_ste.pth' -o -name 'frankenstein.pth' -o -name 'preprocessor.pth' \) -not -path '*/pre_processing_upgrade_9/*' 2>/dev/null | head -1 || true)
+#
+# Selection order matters. An earlier version excluded every path containing
+# `pre_processing_upgrade_9/` to dodge a STALE checkpoint from the cloned repo —
+# but the train kernel's output lives under exactly that directory name (its
+# /kaggle/working contains the clone), so v9-driven evals died with
+# "no preprocessor.pth in /kaggle/input" while v8-driven ones passed. Key on the
+# RUN DIRECTORY this config trains into instead: it is unique per experiment and
+# immune to both the clone's stale checkpoints and other runs' outputs.
+OUT_DIR=$(grep -m1 -E '^out_dir:[[:space:]]*' __CONFIG__ | awk '{print $2}')
+CKPT_SRC=""
+if [ -n "${OUT_DIR:-}" ]; then
+  CKPT_SRC=$(find /kaggle/input -path "*${OUT_DIR}/checkpoints/preprocessor.pth" 2>/dev/null | head -1 || true)
+fi
+# fall back to a named checkpoint shipped as a dataset, then to any preprocessor.pth
+if [ -z "$CKPT_SRC" ]; then
+  CKPT_SRC=$(find /kaggle/input \( -name 'v9b_dualcodec.pth' -o -name 'frankenstein_ste.pth' -o -name 'frankenstein.pth' \) 2>/dev/null | head -1 || true)
+fi
+if [ -z "$CKPT_SRC" ]; then
+  CKPT_SRC=$(find /kaggle/input -name 'preprocessor.pth' 2>/dev/null | head -1 || true)
+fi
 if [ -z "$CKPT_SRC" ]; then
   echo "ERROR: no preprocessor.pth in /kaggle/input (attach the train kernel's output as a data source)" >&2
   exit 1
