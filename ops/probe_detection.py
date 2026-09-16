@@ -65,7 +65,7 @@ def load_coco(images_dir: Path, ann_file: Path, n: int, size: int, seed: int = 0
         img = Image.open(p).convert("RGB")
         w0, h0 = img.size
         img = img.resize((size, size), Image.BILINEAR)
-        arr = torch.from_numpy(np.asarray(img)).float().div_(255.0)     # [H,W,3]
+        arr = torch.from_numpy(np.array(img, copy=True)).float().div_(255.0)     # [H,W,3]
         t = arr.permute(2, 0, 1).unsqueeze(0).unsqueeze(2)              # [1,3,1,H,W]
         out.append((im["id"], t, (h0, w0), id_to_ann[im["id"]]))
     return ann, out
@@ -134,9 +134,18 @@ def coco_map(results, gt_by_id, image_ids, ann_meta):
 
 
 # ---------------------------------------------------------------- probe ----
-def _load_at(images_dir: Path, ann_file: Path, n: int, size: int, seed: int):
-    """Load the fixture/COCO subset at one resolution, with rescaled gt boxes."""
+def _load_at(images_dir: Path, ann_file: Path, n: int, size: int, seed: int,
+             device: torch.device | None = None):
+    """Load the fixture/COCO subset at one resolution, with rescaled gt boxes.
+
+    Tensors are moved to ``device`` here rather than at each use site: the
+    detector moves its own input internally but the preprocessor does not, so a
+    CPU tensor against CUDA weights raises only on the PRE pass — a mismatch a
+    CPU-only local pre-flight cannot surface.
+    """
     ann_meta, items = load_coco(images_dir, ann_file, n, size, seed)
+    if device is not None:
+        items = [(i, t.to(device), hw, a) for i, t, hw, a in items]
     gt_by_id = {i: scaled_gt(a, size, hw) for i, _, hw, a in items}
     image_ids = [i for i, _, _, _ in items]
     return ann_meta, items, gt_by_id, image_ids
@@ -179,8 +188,8 @@ def run(args) -> dict:
     # resolution transfer from task transfer. (GOT-10k already showed the edit
     # transfers across CONTENT domains at 128, so content is not the question.)
     for sz in sizes:
-        ann_meta, items, gt_by_id, image_ids = _load_at(images_dir, ann_file,
-                                                        args.n_images, sz, args.seed)
+        ann_meta, items, gt_by_id, image_ids = _load_at(images_dir, ann_file, args.n_images, sz,
+                                        args.seed, device)
         print(f"[probe] stage A at {sz}px ({len(items)} images)")
 
         def mAP_of(fn, tag, subset=None, _gt=gt_by_id, _ids=image_ids, _meta=ann_meta):
@@ -210,8 +219,8 @@ def run(args) -> dict:
 
     if primary is None:      # --size not listed: use the first swept size
         sz = sizes[0]
-        ann_meta, items, gt_by_id, image_ids = _load_at(images_dir, ann_file,
-                                                        args.n_images, sz, args.seed)
+        ann_meta, items, gt_by_id, image_ids = _load_at(images_dir, ann_file, args.n_images, sz,
+                                        args.seed, device)
         primary = (results["stages"]["A"][str(sz)]["mAP_x"],
                    results["stages"]["A"][str(sz)]["mAP_pre"],
                    results["stages"]["A"][str(sz)]["boxes_anchor"],
