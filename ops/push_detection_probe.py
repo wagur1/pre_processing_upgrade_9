@@ -67,7 +67,7 @@ python ops/probe_detection.py \
     --images "$VAL" --ann "$ANN" --ckpt "$CKPT" \
     --config configs/sandwich_ar.yaml \
     --n-images __N_IMAGES__ --size __SIZE__ --stage-a-sizes __STAGE_A_SIZES__ \
-    --qps __QPS__ --bootstrap __BOOTSTRAP__ --stage both \
+    --qps __QPS__ --bootstrap __BOOTSTRAP__ --stage both --records \
     --out outputs/probe_detection
 
 echo "[detprobe] done"
@@ -87,7 +87,9 @@ def main() -> None:
     ap.add_argument("--size", type=int, default=320)
     ap.add_argument("--stage-a-sizes", default="128,224,320")
     ap.add_argument("--qps", default="30,35,40,45,50")
-    ap.add_argument("--bootstrap", type=int, default=200)
+    ap.add_argument("--bootstrap", type=int, default=0,
+                    help="inline bootstrap draws; 0 (default) skips it — the CI is "
+                         "recomputed offline from --records (CPU seconds, not GPU hours)")
     ap.add_argument("--slug", default="u9-probe-detection")
     ap.add_argument("--accelerator", default="NvidiaTeslaT4")
     a = ap.parse_args()
