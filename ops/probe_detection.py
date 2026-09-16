@@ -142,6 +142,18 @@ def coco_map(results, gt_by_id, image_ids, ann_meta):
 
 
 # ---------------------------------------------------------------- probe ----
+def _coco_box(b) -> list:
+    """torchvision returns boxes as xyxy; COCO's bbox field is xywh.
+
+    Submitting xyxy as xywh silently destroys every IoU match — the "width"
+    becomes x2 and the "height" becomes y2 — which reads as a near-zero mAP at
+    every resolution and looks like a detector or alignment problem instead.
+    """
+    vals = b.tolist() if hasattr(b, "tolist") else list(b)
+    x1, y1, x2, y2 = (float(v) for v in vals[:4])
+    return [x1, y1, max(x2 - x1, 1e-3), max(y2 - y1, 1e-3)]
+
+
 def _load_at(images_dir: Path, ann_file: Path, n: int, size: int, seed: int,
              device: torch.device | None = None):
     """Load the fixture/COCO subset at one resolution, with rescaled gt boxes.
@@ -210,8 +222,7 @@ def run(args) -> dict:
                 keep = d["scores"] >= det.score_thresh
                 for b, s, l in zip(d["boxes"][keep], d["scores"][keep], d["labels"][keep]):
                     preds.append({"image_id": i, "category_id": int(l),
-                                  "bbox": [float(v) for v in b.tolist()],
-                                  "score": float(s)})
+                                  "bbox": _coco_box(b), "score": float(s)})
             coco_ap, ap50 = coco_map(preds, _gt, ids, _meta)
             print(f"[probe] {tag}: mAP={coco_ap:.4f} mAP@.5={ap50:.4f} "
                   f"({len(preds)} boxes >= {det.score_thresh} over {len(ids)} images)")
@@ -282,7 +293,7 @@ def run(args) -> dict:
                     d = det.predict(rec[:, :, 0])[0]
                     keep = d["scores"] >= det.score_thresh
                     preds = [{"image_id": i, "category_id": int(l),
-                              "bbox": [float(v) for v in b.tolist()], "score": float(s)}
+                              "bbox": _coco_box(b), "score": float(s)}
                              for b, s, l in zip(d["boxes"][keep], d["scores"][keep],
                                                 d["labels"][keep])]
                     per_image[arm][(codec_name, qp)][i] = (float(bpp[0]), preds)
