@@ -74,7 +74,15 @@ class _EditorBlock(nn.Module):
         self.up = nn.ConvTranspose2d(2 * ch, ch, 2, stride=2)
         self.dec = nn.Sequential(nn.Conv2d(2 * ch, ch, 3, padding=1), nn.ReLU(inplace=True))
         self.out = nn.Conv2d(ch, 3, 3, padding=1)
-        nn.init.zeros_(self.out.weight)
+        # NOT zero-init: a zero output conv times the zero-initialised
+        # ``edit_strength`` gate is a dead saddle — both factors sit at exactly
+        # zero, so both gradients are exactly zero and the editor subnet never
+        # leaves zero. Measured 2026-09-16 on every trained sandwich checkpoint:
+        # edit_strength == +0.000000 and |W_out| == 0, i.e. M2 has never been
+        # active in any recorded result. This is the same repair the POST half
+        # needed in v8 (commit 3a948521e5db): small noise + zero gate keeps the
+        # model an exact identity at init while leaving both gradients alive.
+        nn.init.normal_(self.out.weight, std=1e-3)
         nn.init.zeros_(self.out.bias)
 
     def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
@@ -101,12 +109,13 @@ class UPVCMPreprocessor(nn.Module):
 
     def __init__(self, s_ch: int = 16, editor_ch: int = 24, cond_dim: int = 1,
                  dino_weight: float = 0.5, dino_name: str = "dinov2_vits14",
-                 motion_tau: float = 0.1):
+                 motion_tau: float = 0.1, w_budget: float = 0.0):
         super().__init__()
         self.cond_dim = int(cond_dim)
         self.dino_weight = float(dino_weight)
         self.dino_name = str(dino_name)
         self.motion_tau = float(motion_tau)
+        self.w_budget = float(w_budget)
 
         # S: importance head — sees the frame AND its temporal difference, so
         # moving objects are salient even when their texture is flat.
@@ -156,6 +165,29 @@ class UPVCMPreprocessor(nn.Module):
         cr = F.conv2d(F.pad(cr, (2, 2, 2, 2), mode="reflect"), kc)
         return ycbcr_to_rgb(torch.cat([y, cb, cr], dim=1))
 
+    def _budget_normalise(self, w_map: torch.Tensor) -> torch.Tensor:
+        """Rescale W to a fixed spatial mean (the ``w_budget``) over (T, H, W).
+
+        Anti-collapse. With a free scale the head drives W to ~0 — measured on
+        every trained checkpoint, logits ~ -60 — which silently turns M1 into a
+        global edit, gates M2 off entirely (W * edit ~ 1e-12) and makes M3 a
+        global freeze. Fixing the mean keeps the model's CHOICE of where the
+        budget goes while removing the option of spending none.
+
+        Dividing by the SUM (not by a floored mean) is what makes it robust: it
+        is scale-free, so even a fully saturated sigmoid comes back as a uniform
+        map at exactly ``w_budget`` instead of decaying toward zero. A map
+        concentrated on very few pixels can drop below the budget after the
+        ``clamp`` — that is a different, self-limiting failure (a spike makes
+        M1's gate negative, which the loss punishes). ``w_budget = 0`` keeps the
+        legacy free scale.
+        """
+        dims = (2, 3, 4)
+        n = w_map.shape[2] * w_map.shape[3] * w_map.shape[4]
+        total = w_map.sum(dim=dims, keepdim=True)
+        out = w_map / total.clamp_min(torch.finfo(w_map.dtype).tiny) * (self.w_budget * n)
+        return out.clamp(0.0, 1.0)
+
     def _importance(self, x: torch.Tensor) -> torch.Tensor:
         """W = S(x) in [0,1], [B,1,T,H,W]. Motion-aware, analyzer-free."""
         b, c, t, h, w = x.shape
@@ -164,7 +196,10 @@ class UPVCMPreprocessor(nn.Module):
         sin = torch.cat([x, diff], dim=1)                    # [B,6,T,H,W]
         sin = sin.permute(0, 2, 1, 3, 4).reshape(b * t, 6, h, w)
         w_map = torch.sigmoid(self.s_net(sin))               # [B*T,1,H,W]
-        return w_map.reshape(b, t, h, w).unsqueeze(1)
+        w_map = w_map.reshape(b, t, h, w).unsqueeze(1)       # [B,1,T,H,W]
+        if self.w_budget > 0:
+            w_map = self._budget_normalise(w_map)
+        return w_map
 
     def _stabilise(self, x2: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
         """M3: copy static background from the previous OUTPUT frame.
@@ -218,6 +253,11 @@ class UPVCMPreprocessor(nn.Module):
                 else:
                     de = dino_energy(x, dino)
                     tgt = (1 - self.dino_weight) * mask + self.dino_weight * de
+            if self.w_budget > 0:
+                # match the prediction's normalisation so ``rho`` distils the
+                # SHAPE of the saliency map (where to spend) rather than its
+                # absolute scale (which the budget now owns)
+                tgt = self._budget_normalise(tgt)
             self._last_w_target = tgt.detach()
 
         frames = self._frames(x)

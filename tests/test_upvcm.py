@@ -66,6 +66,46 @@ def test_gradients_reach_s_and_modules():
     assert pre.dec_strength.grad is not None               # gates learn
     assert pre.edit_strength.grad is not None
     assert pre.stab_strength.grad is not None
+    # ...but "not None" is not enough: a zero tensor also passes that check and
+    # is exactly the signature of the dead M2 saddle, so require non-zero.
+    assert pre.s_net[0].weight.grad.abs().max() > 0
+    assert pre.dec_strength.grad.abs().max() > 0
+    assert pre.stab_strength.grad.abs().max() > 0
+    assert pre.edit_strength.grad.abs().max() > 0, "M2 gate is stuck at zero"
+
+
+def test_editor_is_not_born_dead():
+    """Regression for the M2 dead saddle (fixed 2026-09-16).
+
+    A zero-init output conv combined with a zero-init ``edit_strength`` gate
+    makes BOTH factors exactly zero, so both gradients are exactly zero and the
+    editor never switches on. Every checkpoint trained before the fix has
+    ``edit_strength == 0.0`` and ``|W_out| == 0`` — the ROI editor has never
+    been active in any recorded result. The fix (small noise on the output
+    conv, gate still zero) keeps identity-at-init but makes the gate alive at
+    step 0 and the whole subnet alive from step 1.
+    """
+    torch.manual_seed(0)
+    pre = UPVCMPreprocessor()
+    x = _clip()
+    cond = torch.rand(2, 1)
+
+    # identity at init must survive the repair
+    with torch.no_grad():
+        assert torch.allclose(pre(x, cond), x, atol=1e-6)
+
+    # step 0: the gate sees a non-zero gradient
+    pre(x, cond).pow(2).mean().backward()
+    assert pre.edit_strength.grad.abs().max() > 0, "gate dead at init"
+
+    # step 1 onward: the subnet (whose gradient carries the gate as a factor)
+    # comes alive as soon as the gate has moved off zero
+    opt = torch.optim.SGD(pre.parameters(), lr=1e-3)
+    opt.step()
+    opt.zero_grad()
+    pre(x, cond).pow(2).mean().backward()
+    assert pre.editor.out.weight.grad.abs().max() > 0, "editor subnet dead"
+    assert pre.edit_strength.grad.abs().max() > 0
 
 
 def test_module_gates_actually_change_output():
@@ -131,6 +171,45 @@ def test_param_count_recorded():
     # ~44k at (s_ch=16, editor_ch=24); guard against accidental blow-up
     assert 30_000 < n < 100_000, f"unexpected param count {n}"
     assert math.isfinite(n)
+
+
+def test_w_budget_prevents_collapse():
+    """With ``w_budget`` the importance map cannot collapse to zero.
+
+    Every trained checkpoint has W ~ 1e-9 (logits ~ -60), which disables the
+    spatial selectivity of M1/M2/M3 and makes the M2 gate's gradient ~1e-14.
+    The budget normalisation must restore a usable map even from that exact
+    state — including full saturation, where the ratio form returns a uniform
+    map at the budget instead of decaying to zero.
+    """
+    torch.manual_seed(0)
+    pre = UPVCMPreprocessor(w_budget=0.25)
+    x = _clip()
+    cond = torch.rand(2, 1)
+
+    # reproduce the trained collapse: constant logits at -60
+    with torch.no_grad():
+        pre.s_net[4].weight.zero_()
+        pre.s_net[4].bias.fill_(-60.0)
+    pre(x, cond)
+    w = pre._last_w
+    assert abs(w.mean().item() - 0.25) < 1e-3, f"budget not enforced: {w.mean().item():.3e}"
+
+    # the distill target is normalised into the same space, so rho distils the
+    # SHAPE of the saliency map rather than its absolute scale
+    mask = torch.rand(2, 1, 8, 64, 64)
+    pre(x, cond, mask=mask)
+    assert pre._last_w_target is not None
+    assert 0.1 < pre._last_w_target.mean().item() < 0.5
+
+    # legacy behaviour (budget 0) must be untouched
+    torch.manual_seed(0)
+    legacy = UPVCMPreprocessor()
+    with torch.no_grad():
+        legacy.s_net[4].weight.zero_()
+        legacy.s_net[4].bias.fill_(-60.0)
+    legacy(x, cond)
+    assert legacy._last_w.mean().item() < 1e-6
 
 
 if __name__ == "__main__":

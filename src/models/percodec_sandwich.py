@@ -94,11 +94,13 @@ class PerCodecPostSandwich(nn.Module):
 
     def __init__(self, s_ch: int = 16, editor_ch: int = 24, cond_dim: int = 1,
                  dino_weight: float = 0.5, dino_name: str = "dinov2_vits14",
-                 motion_tau: float = 0.1, post_base: int = 32):
+                 motion_tau: float = 0.1, post_base: int = 32,
+                 w_budget: float = 0.0):
         super().__init__()
         self.pre = UPVCMPreprocessor(
             s_ch=s_ch, editor_ch=editor_ch, cond_dim=cond_dim,
-            dino_weight=dino_weight, dino_name=dino_name, motion_tau=motion_tau)
+            dino_weight=dino_weight, dino_name=dino_name, motion_tau=motion_tau,
+            w_budget=w_budget)
         self.post_net = _PostUNetCodec(base=post_base, cond_dim=cond_dim)
         self.post_strength = nn.Parameter(torch.zeros(()))
         self.bypass_post = False

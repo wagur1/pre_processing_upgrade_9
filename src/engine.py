@@ -124,6 +124,7 @@ def _build_models(cfg: dict, device: torch.device, role: str = "train"):
             dino_name=str(m.get("dino_name", "dinov2_vits14")),
             motion_tau=float(m.get("motion_tau", 0.1)),
             post_base=int(m.get("post_base", 32)),
+            w_budget=float(m.get("w_budget", 0.0)),
         ).to(device)
     elif arch == "dualcodec":
         # v9-b full: per-codec PRE + per-codec POST (the modular union).
@@ -135,6 +136,7 @@ def _build_models(cfg: dict, device: torch.device, role: str = "train"):
             dino_name=str(m.get("dino_name", "dinov2_vits14")),
             motion_tau=float(m.get("motion_tau", 0.1)),
             post_base=int(m.get("post_base", 32)),
+            w_budget=float(m.get("w_budget", 0.0)),
         ).to(device)
     elif arch == "dualpost":
         # v9-b (docs/MODEL_PERCODEC.md): TWO independent POST UNets, exact
@@ -147,6 +149,7 @@ def _build_models(cfg: dict, device: torch.device, role: str = "train"):
             dino_name=str(m.get("dino_name", "dinov2_vits14")),
             motion_tau=float(m.get("motion_tau", 0.1)),
             post_base=int(m.get("post_base", 32)),
+            w_budget=float(m.get("w_budget", 0.0)),
         ).to(device)
     elif arch == "percodec_sandwich":
         # v9 (docs/MODEL_PERCODEC.md): UP-VCM PRE + codec-conditioned POST.
@@ -159,6 +162,7 @@ def _build_models(cfg: dict, device: torch.device, role: str = "train"):
             dino_name=str(m.get("dino_name", "dinov2_vits14")),
             motion_tau=float(m.get("motion_tau", 0.1)),
             post_base=int(m.get("post_base", 32)),
+            w_budget=float(m.get("w_budget", 0.0)),
         ).to(device)
     elif arch == "upvcm":
         # v7 NEW MODEL (docs/MODEL_UPVCM.md): self-sufficient importance head
@@ -173,6 +177,7 @@ def _build_models(cfg: dict, device: torch.device, role: str = "train"):
             dino_weight=float(m.get("dino_weight", 0.5)),
             dino_name=str(m.get("dino_name", "dinov2_vits14")),
             motion_tau=float(m.get("motion_tau", 0.1)),
+            w_budget=float(m.get("w_budget", 0.0)),
         ).to(device)
     elif arch == "unet":
         pre = VideoPreprocessor(
@@ -251,7 +256,50 @@ def _build_models(cfg: dict, device: torch.device, role: str = "train"):
 
 
 def _optimizer(pre, tr):
-    return torch.optim.Adam(pre.parameters(), lr=tr.get("lr", 1e-4))
+    # Only trainable parameters: ``train.freeze_except`` may have frozen a
+    # prefix, and Adam would otherwise keep (no-op) state for frozen tensors.
+    params = [p for p in pre.parameters() if p.requires_grad]
+    return torch.optim.Adam(params, lr=tr.get("lr", 1e-4))
+
+
+def _repair_dead_editor(model) -> int:
+    """Re-apply the repaired init to any all-zero M2 editor output conv.
+
+    ``load_state_dict`` from a pre-2026-09-16 checkpoint restores the exact-zero
+    output conv that put the ROI editor into its dead saddle, which would make a
+    warm-start probe dead on arrival. An all-zero output conv is dead by
+    definition (see ``UPVCMPreprocessor``), so repairing it is always safe and
+    idempotent: it can only fire on a module that provably cannot contribute.
+    """
+    repaired = 0
+    for name, mod in model.named_modules():
+        if name.endswith("editor.out") and isinstance(mod, torch.nn.Conv2d):
+            if mod.weight.abs().max().item() == 0.0:
+                torch.nn.init.normal_(mod.weight, std=1e-3)
+                torch.nn.init.zeros_(mod.bias)
+                repaired += 1
+    return repaired
+
+
+def _reinit_modules(model, prefixes) -> int:
+    """Re-initialise the default weights of modules matching any prefix.
+
+    A warm-start probe loads a checkpoint whose PRE carries modules that are
+    unusable by construction: the M2 editor output conv is exactly zero (dead
+    saddle, repaired separately) and the S head is saturated (logits ~ -60, so
+    W ~ 1e-9 and every W-gated mechanism is effectively off). ``load_state_dict``
+    restores that state, so a probe that intends to TRAIN those modules has to
+    reset them first. A name matches on a full segment anywhere in the path, so
+    ``s_net`` finds ``pre.s_net``.
+    """
+    n = 0
+    for name, mod in model.named_modules():
+        if any(name == p or name.endswith("." + p) or f".{p}." in name
+               for p in prefixes):
+            if hasattr(mod, "reset_parameters"):
+                mod.reset_parameters()
+                n += 1
+    return n
 
 
 def _ckpt_path(cfg: dict) -> Path:
@@ -431,6 +479,31 @@ def _fit(cfg, pre, codec, analyzer, train_loader, val_loader, prep_batch,
         mu=lw.get("mu", 0.0),
         use_task_mask=bool(lw.get("use_task_mask", False)),
     )
+    # Optional parameter freeze (bounded probes): keep a pretrained model fixed
+    # and train ONLY the parameters whose names start with one of the given
+    # prefixes. ``train.freeze_except: [editor, edit_strength]`` unlocks the M2
+    # editor on a converged checkpoint and trains nothing else, so the probe's
+    # starting point is exactly the record model and any BD change is
+    # attributable to the newly unlocked module alone.
+    freeze_except = list(tr.get("freeze_except") or [])
+    if freeze_except:
+        # Prefix matches either the start of the parameter name or a dotted
+        # segment inside it, so the config can say ``editor`` / ``edit_strength``
+        # without knowing whether the arch nests them under ``pre.`` (sandwich),
+        # ``pre_264.`` (per-codec) or nothing at all.
+        def _keeps(name: str) -> bool:
+            return any(name.startswith(p) or f".{p}" in name for p in freeze_except)
+
+        trainable = frozen = 0
+        for name, p in pre.named_parameters():
+            keep = _keeps(name)
+            p.requires_grad_(keep)
+            if keep:
+                trainable += p.numel()
+            else:
+                frozen += p.numel()
+        print(f"[train] freeze_except={list(freeze_except)} -> "
+              f"{trainable:,} trainable / {frozen:,} frozen params", flush=True)
     opt = _optimizer(pre, tr)
     # D8: the learned-rate prior carries its own Adam so its tiny tables can
     # move at a different pace than the U-Net (and survive cosine decay of
@@ -476,9 +549,18 @@ def _fit(cfg, pre, codec, analyzer, train_loader, val_loader, prep_batch,
         if src.exists():
             sd = torch.load(src, map_location=device)
             pre.load_state_dict(sd["model"] if "model" in sd else sd)
+            repaired = _repair_dead_editor(pre)
             print(f"[train] fine-tune: loaded weights from {src} "
                   f"(fresh optimizer, lr={tr.get('lr')}, {epochs} epoch(s), "
                   f"max_steps={max_steps})")
+            if repaired:
+                print(f"[train]   dead-saddle repair: re-initialised {repaired} "
+                      f"all-zero editor output conv(s) from the checkpoint")
+            reinit = list(tr.get("reinit_prefixes") or [])
+            if reinit:
+                n_reinit = _reinit_modules(pre, reinit)
+                print(f"[train]   reinit_prefixes={reinit}: reset {n_reinit} "
+                      f"module(s) to default init (checkpoint state unusable)")
         else:
             print("[train] fine-tune requested but no Stage-1 checkpoint found -> "
                   "training from scratch")
