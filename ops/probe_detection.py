@@ -112,7 +112,14 @@ class Detector:
 
 
 def coco_map(results, gt_by_id, image_ids, ann_meta):
-    """mAP@[.5:.95] and mAP@0.5 for the given predictions (pycocotools)."""
+    """mAP@[.5:.95] and mAP@0.5 for the given predictions (pycocotools).
+
+    COCOeval.summarize() prints ~13 lines per call and the bootstrap makes
+    thousands of calls, so its output is captured and discarded — on a kernel
+    log stream that noise is both unreadable and slow."""
+    import contextlib
+    import io
+
     from pycocotools import mask as _mask  # noqa: F401
     from pycocotools.coco import COCO
     from pycocotools.cocoeval import COCOeval
@@ -129,7 +136,8 @@ def coco_map(results, gt_by_id, image_ids, ann_meta):
     ev.params.imgIds = list(image_ids)
     ev.evaluate()
     ev.accumulate()
-    ev.summarize()
+    with contextlib.redirect_stdout(io.StringIO()):
+        ev.summarize()
     return float(ev.stats[0]), float(ev.stats[1])
 
 
@@ -303,7 +311,7 @@ def run(args) -> dict:
         if args.bootstrap:
             draws = []
             rng = random.Random(0)
-            for _ in range(args.bootstrap):
+            for d in range(args.bootstrap):
                 sub = [i for i in image_ids if rng.random() < 0.8]
                 cur = {}
                 for arm in arms:
@@ -317,12 +325,43 @@ def run(args) -> dict:
                 for arm in ("prep", "sandwich"):
                     draws.append(bd_rate(cur["anchor"]["rate"], cur["anchor"]["mAP"],
                                          cur[arm]["rate"], cur[arm]["mAP"]))
+                if (d + 1) % 25 == 0:
+                    print(f"[probe] bootstrap {d + 1}/{args.bootstrap} draws ({codec_name})",
+                          flush=True)
             ok = [d for d in draws if np.isfinite(d)]
             if ok:
                 entry["ci"] = {"lo": float(np.percentile(ok, 2.5)),
                                "hi": float(np.percentile(ok, 97.5)),
                                "n_draws": len(ok)}
         results["stages"]["B"][codec_name] = entry
+
+    # persist the per-image records: mAP/BD/CI can then be recomputed offline,
+    # which is what makes a 5000-image run possible at all — the probe shards by
+    # image across kernels (the detector passes dominate: 3 per image per cell)
+    # and the merge re-uses the bootstrap instead of re-running the detector.
+    if args.records:
+        rec_path = Path(args.out) / "per_image_records.npz"
+        rec_path.parent.mkdir(parents=True, exist_ok=True)
+        flat = {}
+        for arm in arms:
+            for (codec_name, qp), slot in per_image[arm].items():
+                img = sorted(slot)
+                boxes, offs, labs = [], [0], []
+                for i in img:
+                    for p in slot[i][1]:
+                        boxes.append(p["bbox"] + [p["score"]])
+                        labs.append(p["category_id"])
+                    offs.append(len(boxes))
+                tag = f"{arm}_{codec_name}_{qp}"
+                flat[f"{tag}_img"] = np.asarray(img, dtype=np.int64)
+                flat[f"{tag}_bpp"] = np.asarray([slot[i][0] for i in img], dtype=np.float32)
+                flat[f"{tag}_boxes"] = np.asarray(boxes, dtype=np.float32).reshape(-1, 5)
+                flat[f"{tag}_labels"] = np.asarray(labs, dtype=np.int32)
+                flat[f"{tag}_offsets"] = np.asarray(offs, dtype=np.int64)
+        np.savez_compressed(rec_path, **flat)
+        print(f"[probe] per-image records -> {rec_path} ({rec_path.stat().st_size / 1e6:.1f} MB)",
+              flush=True)
+
     results["verdict"] = "ran"
     return results
 
@@ -350,6 +389,9 @@ def main() -> None:
                     help="abort if the anchor yields fewer detections: a broken "
                          "detector/resolution setup, not a PRE effect")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--records", action="store_true",
+                    help="persist per-image (bpp, detections) so mAP/BD/CI can be "
+                         "recomputed offline and image shards can be merged")
     ap.add_argument("--out", default="outputs/probe_detection")
     a = ap.parse_args()
     res = run(a)
