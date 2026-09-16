@@ -49,9 +49,12 @@ print(f"[detprobe] torch {torch.__version__} cuda {torch.cuda.is_available()} "
 PY
 
 # ---- locate inputs ------------------------------------------------------
-VAL=$(find /kaggle/input -maxdepth 5 -type d -name val2017 | head -1 || true)
-ANN=$(find /kaggle/input -maxdepth 5 -name 'instances_val2017.json' | head -1 || true)
-CKPT=$(find /kaggle/input -name 'preprocessor.pth' | head -1 || true)
+# Kaggle mounts datasets at /kaggle/input/datasets/<owner>/<slug>/..., so the
+# annotation file sits 6 levels down: maxdepth must clear that (a tighter bound
+# silently returned an empty path and cost a session).
+VAL=$(find /kaggle/input -maxdepth 8 -type d -name val2017 | head -1 || true)
+ANN=$(find /kaggle/input -maxdepth 8 -name 'instances_val2017.json' | head -1 || true)
+CKPT=$(find /kaggle/input -maxdepth 8 -name 'preprocessor.pth' | head -1 || true)
 echo "[detprobe] val=$VAL"
 echo "[detprobe] ann=$ANN"
 echo "[detprobe] ckpt=$CKPT"
