@@ -47,11 +47,30 @@ class _PostUNet(nn.Module):
     Wider than the M2 editor (restoration is harder than structure shaping:
     it must undo quantisation damage at all rates): ~577k params at base=32
     — still two orders below the analyzers it serves.
+
+    ``temporal=True`` adds a second, additive input branch over the two
+    NEIGHBOURING decoded frames. Codec artifacts are strongly temporally
+    correlated (I vs P frames, error propagation along the GOP, flicker) and
+    the neighbours carry what a single frame cannot: the same content coded at
+    a different point in the prediction chain. The branch is zero-initialised,
+    so the module is EXACTLY the per-frame restorer at init — a warm start from
+    the record checkpoint is behaviour-preserving and every gain is traceable
+    to the temporal path. Unlike the gate x module products elsewhere in this
+    repo this cannot dead-saddle: it adds into an already-live trunk, so its
+    gradient is non-zero at step 0.
     """
 
-    def __init__(self, base: int = 32, cond_dim: int = 1):
+    def __init__(self, base: int = 32, cond_dim: int = 1, temporal: bool = False):
         super().__init__()
+        self.temporal = bool(temporal)
         self.in_conv = nn.Conv2d(3, base, 3, padding=1)
+        if self.temporal:
+            # 6 input channels = (prev, next) x RGB; zero-init so the module
+            # starts as the per-frame restorer and the temporal path earns its
+            # contribution from the loss rather than from a lucky init.
+            self.in_conv_t = nn.Conv2d(6, base, 3, padding=1)
+            nn.init.zeros_(self.in_conv_t.weight)
+            nn.init.zeros_(self.in_conv_t.bias)
         self.enc1 = nn.Sequential(nn.ReLU(inplace=True),
                                   nn.Conv2d(base, base, 3, padding=1))
         self.down1 = nn.Conv2d(base, 2 * base, 3, stride=2, padding=1)
@@ -77,9 +96,16 @@ class _PostUNet(nn.Module):
         nn.init.normal_(self.out_conv.weight, std=1e-3)
         nn.init.zeros_(self.out_conv.bias)
 
-    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
-        # x [N,3,H,W], cond [N,cond_dim]
+    def forward(self, x: torch.Tensor, cond: torch.Tensor,
+                neighbours: torch.Tensor | None = None) -> torch.Tensor:
+        # x [N,3,H,W], cond [N,cond_dim], neighbours [N,6,H,W] (temporal only)
         e0 = self.in_conv(x)
+        if self.temporal:
+            if neighbours is None:
+                raise ValueError(
+                    "temporal POST requires `neighbours` (prev/next frames); "
+                    "call post_restore with a [B,3,T,H,W] clip")
+            e0 = e0 + self.in_conv_t(neighbours)
         e1 = self.enc1(e0)
         e2 = self.enc2(self.down1(e1))
         b = self.mid(self.down2(e2))
@@ -104,13 +130,14 @@ class SandwichPreprocessor(nn.Module):
     def __init__(self, s_ch: int = 16, editor_ch: int = 24, cond_dim: int = 1,
                  dino_weight: float = 0.5, dino_name: str = "dinov2_vits14",
                  motion_tau: float = 0.1, post_base: int = 32,
-                 w_budget: float = 0.0):
+                 w_budget: float = 0.0, post_temporal: bool = False):
         super().__init__()
         self.pre = UPVCMPreprocessor(
             s_ch=s_ch, editor_ch=editor_ch, cond_dim=cond_dim,
             dino_weight=dino_weight, dino_name=dino_name, motion_tau=motion_tau,
             w_budget=w_budget)
-        self.post_net = _PostUNet(base=post_base, cond_dim=cond_dim)
+        self.post_net = _PostUNet(base=post_base, cond_dim=cond_dim,
+                                  temporal=post_temporal)
         self.post_strength = nn.Parameter(torch.zeros(()))
         # eval-time decomposition switch (not part of the state_dict)
         self.bypass_post = False
@@ -139,7 +166,16 @@ class SandwichPreprocessor(nn.Module):
         if cond is None:
             cond = frames.new_zeros(b, self.pre.cond_dim)
         cond_f = cond.repeat_interleave(t, dim=0).to(frames.dtype)
-        delta = self.post_net(frames, cond_f)
+        neighbours = None
+        if self.post_net.temporal:
+            # causal-free ±1 window (edges replicate the boundary frame): the
+            # restorer gets the same content coded elsewhere in the GOP, which
+            # is exactly what a per-frame filter cannot see.
+            prev = torch.cat([x_hat[:, :, :1], x_hat[:, :, :-1]], dim=2)
+            nxt = torch.cat([x_hat[:, :, 1:], x_hat[:, :, -1:]], dim=2)
+            nb = torch.cat([prev, nxt], dim=1)                 # [B,6,T,H,W]
+            neighbours = nb.permute(0, 2, 1, 3, 4).reshape(b * t, 2 * c, h, w)
+        delta = self.post_net(frames, cond_f, neighbours)
         out = frames + self.post_strength * delta
         return out.clamp(0.0, 1.0).reshape(b, t, c, h, w).permute(0, 2, 1, 3, 4)
 

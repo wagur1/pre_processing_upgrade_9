@@ -125,6 +125,7 @@ def _build_models(cfg: dict, device: torch.device, role: str = "train"):
             motion_tau=float(m.get("motion_tau", 0.1)),
             post_base=int(m.get("post_base", 32)),
             w_budget=float(m.get("w_budget", 0.0)),
+            post_temporal=bool(m.get("post_temporal", False)),
         ).to(device)
     elif arch == "dualcodec":
         # v9-b full: per-codec PRE + per-codec POST (the modular union).
@@ -279,6 +280,27 @@ def _repair_dead_editor(model) -> int:
                 torch.nn.init.zeros_(mod.bias)
                 repaired += 1
     return repaired
+
+
+def _load_state_compat(model, state: dict) -> list:
+    """Strict load, falling back to a REPORTED partial load for new branches.
+
+    A warm start into an architecture that gained a branch (e.g. the temporal
+    POST input) legitimately misses keys — they are new parameters sitting at
+    their init. Missing keys are therefore allowed and returned; UNEXPECTED keys
+    (the checkpoint carries something this model does not have) would be dropped
+    silently, so they are raised as an error.
+    """
+    try:
+        model.load_state_dict(state)
+        return []
+    except RuntimeError as exc:
+        res = model.load_state_dict(state, strict=False)
+        if res.unexpected_keys:
+            raise RuntimeError(
+                "checkpoint has unexpected keys that would be dropped: "
+                f"{list(res.unexpected_keys)[:8]}") from exc
+        return list(res.missing_keys)
 
 
 def _reinit_modules(model, prefixes) -> int:
@@ -548,11 +570,14 @@ def _fit(cfg, pre, codec, analyzer, train_loader, val_loader, prep_batch,
         src = ckpt_path if ckpt_path.exists() else last_path
         if src.exists():
             sd = torch.load(src, map_location=device)
-            pre.load_state_dict(sd["model"] if "model" in sd else sd)
+            missing = _load_state_compat(pre, sd["model"] if "model" in sd else sd)
             repaired = _repair_dead_editor(pre)
             print(f"[train] fine-tune: loaded weights from {src} "
                   f"(fresh optimizer, lr={tr.get('lr')}, {epochs} epoch(s), "
                   f"max_steps={max_steps})")
+            if missing:
+                print(f"[train]   compatible load: {len(missing)} new parameter(s) "
+                      f"left at init (e.g. {missing[:4]})")
             if repaired:
                 print(f"[train]   dead-saddle repair: re-initialised {repaired} "
                       f"all-zero editor output conv(s) from the checkpoint")
@@ -797,7 +822,7 @@ def evaluate(cfg: dict, ckpt_path: str, out_dir: str | None = None) -> dict:
                      "base_ch", "res_scale", "cond_dim", "max_relative_edit",
                      # upvcm arch knobs (must match training exactly)
                      "s_ch", "editor_ch", "dino_weight", "dino_name", "motion_tau",
-                     "post_base")
+                     "post_base", "w_budget", "post_temporal")
         for k in arch_keys:
             if k in ckpt_cfg["model"]:
                 cfg.setdefault("model", {})[k] = ckpt_cfg["model"][k]
