@@ -134,58 +134,93 @@ def coco_map(results, gt_by_id, image_ids, ann_meta):
 
 
 # ---------------------------------------------------------------- probe ----
+def _load_at(images_dir: Path, ann_file: Path, n: int, size: int, seed: int):
+    """Load the fixture/COCO subset at one resolution, with rescaled gt boxes."""
+    ann_meta, items = load_coco(images_dir, ann_file, n, size, seed)
+    gt_by_id = {i: scaled_gt(a, size, hw) for i, _, hw, a in items}
+    image_ids = [i for i, _, _, _ in items]
+    return ann_meta, items, gt_by_id, image_ids
+
+
 def run(args) -> dict:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     images_dir = Path(args.images)
     ann_file = Path(args.ann) if args.ann else images_dir.parent / "annotations" / "instances_val2017.json"
     print(f"[probe] images={images_dir} ann={ann_file} device={device}")
 
-    ann_meta, items = load_coco(images_dir, ann_file, args.n_images, args.size, args.seed)
-    print(f"[probe] {len(items)} images at {args.size}px")
-    gt_by_id = {i: scaled_gt(a, args.size, hw) for i, _, hw, a in items}
-    image_ids = [i for i, _, _, _ in items]
-
     cfg = apply_overrides(load_config(args.config),
-                          [f"device={device.type}", "model.post_base=64"])
-    pre, codec, _ = _build_models(cfg, device, role="eval")
+                          [f"device={device.type}"])
     state = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+    ck_cfg = (state.get("cfg") or {}).get("model", {}) if isinstance(state, dict) else {}
+    # the POST width must match the checkpoint, whatever the yaml says
+    if "post_base" in ck_cfg:
+        cfg.setdefault("model", {})["post_base"] = int(ck_cfg["post_base"])
+        print(f"[probe] post_base from checkpoint: {ck_cfg['post_base']}")
+    pre, codec, _ = _build_models(cfg, device, role="eval")
     pre.load_state_dict(state["model"] if "model" in state else state)
     pre.eval()
     print(f"[probe] PRE+POST loaded from {args.ckpt}")
 
     det = Detector(device)
-    results: dict = {"n_images": len(items), "size": args.size, "stages": {}}
-
-    # ---------------- stage A: no codec, does the edit preserve detection? --
-    def mAP_of(fn, tag, subset=None):
-        ids = image_ids if subset is None else subset
-        preds = []
-        for i, t, hw, _ in items:
-            if i not in ids:
-                continue
-            d = fn(t)[0]
-            keep = d["scores"] >= det.score_thresh
-            for b, s, l in zip(d["boxes"][keep], d["scores"][keep], d["labels"][keep]):
-                preds.append({"image_id": i, "category_id": int(l),
-                              "bbox": [float(v) for v in b.tolist()], "score": float(s)})
-        coco_ap, ap50 = coco_map(preds, gt_by_id, ids, ann_meta)
-        print(f"[probe] {tag}: mAP={coco_ap:.4f} mAP@.5={ap50:.4f} "
-              f"({len(preds)} boxes >= {det.score_thresh} over {len(ids)} images)")
-        return coco_ap, len(preds)
-
-    def det_plain(t):
-        return det.predict(t)
+    sizes = [int(s) for s in (args.stage_a_sizes or str(args.size)).split(",")]
+    results: dict = {"n_images": args.n_images, "size": args.size,
+                     "stage_a_sizes": sizes, "stages": {"A": {}}}
+    primary = None
+    primary_size = args.size
 
     def det_pre(t):
         with torch.no_grad():
             xp = pre(t, _rate_cond(_qp_norm(40, cfg), 1, t.device, t.dtype))
         return det.predict(xp)
 
-    ap_x, n_boxes = mAP_of(det_plain, "stageA anchor (x)")
-    ap_p, _ = mAP_of(det_pre, "stageA prep (pre(x))")
-    results["stages"]["A"] = {"mAP_x": ap_x, "mAP_pre": ap_p,
-                              "boxes_anchor": n_boxes,
-                              "ratio": (ap_p / ap_x) if ap_x > 0 else None}
+    # ------- stage A: no codec, does the edit preserve detection content? ----
+    # Swept over sizes because the PRE was trained at 128: a size where pre(x)
+    # keeps the anchor's mAP and a larger one where it does not separates
+    # resolution transfer from task transfer. (GOT-10k already showed the edit
+    # transfers across CONTENT domains at 128, so content is not the question.)
+    for sz in sizes:
+        ann_meta, items, gt_by_id, image_ids = _load_at(images_dir, ann_file,
+                                                        args.n_images, sz, args.seed)
+        print(f"[probe] stage A at {sz}px ({len(items)} images)")
+
+        def mAP_of(fn, tag, subset=None, _gt=gt_by_id, _ids=image_ids, _meta=ann_meta):
+            ids = _ids if subset is None else subset
+            preds = []
+            for i, t, hw, _ in items:
+                if i not in ids:
+                    continue
+                d = fn(t)[0]
+                keep = d["scores"] >= det.score_thresh
+                for b, s, l in zip(d["boxes"][keep], d["scores"][keep], d["labels"][keep]):
+                    preds.append({"image_id": i, "category_id": int(l),
+                                  "bbox": [float(v) for v in b.tolist()],
+                                  "score": float(s)})
+            coco_ap, ap50 = coco_map(preds, _gt, ids, _meta)
+            print(f"[probe] {tag}: mAP={coco_ap:.4f} mAP@.5={ap50:.4f} "
+                  f"({len(preds)} boxes >= {det.score_thresh} over {len(ids)} images)")
+            return coco_ap, len(preds)
+
+        ap_x, n_boxes = mAP_of(lambda t: det.predict(t), f"stageA[{sz}] anchor (x)")
+        ap_p, _ = mAP_of(det_pre, f"stageA[{sz}] prep (pre(x))")
+        results["stages"]["A"][str(sz)] = {
+            "mAP_x": ap_x, "mAP_pre": ap_p, "boxes_anchor": n_boxes,
+            "ratio": (ap_p / ap_x) if ap_x > 0 else None}
+        if sz == args.size:
+            primary = (ap_x, ap_p, n_boxes, ann_meta, items, gt_by_id, image_ids)
+
+    if primary is None:      # --size not listed: use the first swept size
+        sz = sizes[0]
+        ann_meta, items, gt_by_id, image_ids = _load_at(images_dir, ann_file,
+                                                        args.n_images, sz, args.seed)
+        primary = (results["stages"]["A"][str(sz)]["mAP_x"],
+                   results["stages"]["A"][str(sz)]["mAP_pre"],
+                   results["stages"]["A"][str(sz)]["boxes_anchor"],
+                   ann_meta, items, gt_by_id, image_ids)
+        primary_size = sz
+        print(f"[probe] note: --size {args.size} was not swept; stage B will use {sz}")
+    ap_x, ap_p, n_boxes, ann_meta, items, gt_by_id, image_ids = primary
+    results["size"] = primary_size
+
     if n_boxes < args.min_anchor_boxes:
         print(f"[probe] SETUP PROBLEM: the anchor produced only {n_boxes} boxes "
               f"(< {args.min_anchor_boxes}) — the detector/resolution pairing is "
@@ -194,9 +229,9 @@ def run(args) -> dict:
         results["verdict"] = "degenerate_anchor"
         return results
     if ap_x > 0 and ap_p / ap_x < args.stage_a_threshold:
-        print(f"[probe] STAGE A FAILED: pre(x) keeps only {ap_p / ap_x:.2f} of the "
-              f"anchor mAP (< {args.stage_a_threshold}) -> the edit destroys "
-              f"detection content at this resolution; stopping.")
+        print(f"[probe] STAGE A FAILED at {results['size']}px: pre(x) keeps only "
+              f"{ap_p / ap_x:.2f} of the anchor mAP (< {args.stage_a_threshold}) "
+              f"-> the edit destroys detection content; stopping.")
         results["verdict"] = "stage_A_fail"
         return results
 
@@ -290,7 +325,13 @@ def main() -> None:
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--config", default="configs/sandwich_ar.yaml")
     ap.add_argument("--n-images", type=int, default=500)
-    ap.add_argument("--size", type=int, default=320)
+    ap.add_argument("--size", type=int, default=320,
+                    help="probe resolution used by stage B")
+    ap.add_argument("--stage-a-sizes", default=None,
+                    help="comma list for the cheap stage-A sweep, e.g. 128,224,320. "
+                         "128 is the PRE's training resolution (in-distribution), "
+                         "so a size where pre(x) keeps its mAP but a larger one "
+                         "does not isolates resolution transfer from task transfer.")
     ap.add_argument("--qps", default="30,35,40,45,50")
     ap.add_argument("--stage", choices=["a", "both"], default="both")
     ap.add_argument("--stage-a-threshold", type=float, default=0.85,
