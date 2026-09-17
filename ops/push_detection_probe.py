@@ -63,12 +63,7 @@ if [ -z "$VAL" ] || [ -z "$ANN" ] || [ -z "$CKPT" ]; then
   exit 1
 fi
 
-python ops/probe_detection.py \
-    --images "$VAL" --ann "$ANN" --ckpt "$CKPT" \
-    --config configs/sandwich_ar.yaml \
-    --n-images __N_IMAGES__ --size __SIZE__ --stage-a-sizes __STAGE_A_SIZES__ \
-    --qps __QPS__ --bootstrap __BOOTSTRAP__ --stage both --records \
-    --out outputs/probe_detection
+__INVOKE__
 
 echo "[detprobe] done"
 ls -la outputs/probe_detection || true
@@ -90,11 +85,18 @@ def main() -> None:
     ap.add_argument("--bootstrap", type=int, default=0,
                     help="inline bootstrap draws; 0 (default) skips it — the CI is "
                          "recomputed offline from --records (CPU seconds, not GPU hours)")
+    ap.add_argument("--script", default="ops/probe_detection.py",
+                    help="which probe to run; anything other than the checkpoint "
+                         "probe uses the simple invocation (no --stage/--records)")
+    ap.add_argument("--extra-args", default="")
     ap.add_argument("--slug", default="u9-probe-detection")
     ap.add_argument("--accelerator", default="NvidiaTeslaT4")
     a = ap.parse_args()
 
     src = BASH.replace("__COMMIT__", a.commit)
+    is_model_probe = a.script.endswith("probe_detection.py")
+    src = src.replace("__INVOKE__", model_call if is_model_probe else simple_call)
+    src = src.replace("__SCRIPT__", a.script).replace("__EXTRA_ARGS__", a.extra_args)
     src = src.replace("__N_IMAGES__", str(a.n_images))
     src = src.replace("__SIZE__", str(a.size))
     src = src.replace("__STAGE_A_SIZES__", a.stage_a_sizes)
