@@ -5,6 +5,7 @@ from .got10k import (
     iter_sequences,
     load_sequence,
 )
+from .coco_det import CocoDetDataset, build_coco_index, collate_coco_det
 
 __all__ = [
     "VideoClipDataset",
@@ -13,4 +14,7 @@ __all__ = [
     "collate_got10k",
     "iter_sequences",
     "load_sequence",
+    "CocoDetDataset",
+    "collate_coco_det",
+    "build_coco_index",
 ]

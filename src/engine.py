@@ -46,9 +46,11 @@ from tqdm import tqdm
 
 from .codecs import StandardCodec, ffmpeg_available
 from .data import (
+    CocoDetDataset,
     GOT10kClipDataset,
     VideoClipDataset,
     collate_clips,
+    collate_coco_det,
     collate_got10k,
     iter_sequences,
 )
@@ -478,6 +480,8 @@ def train(cfg: dict) -> str:
     _seed_everything(int(cfg.get("seed", 0)))
     if cfg["task"]["name"] == "tracking":
         return _train_tracking(cfg)
+    if cfg["task"]["name"] == "object_detection":
+        return _train_detection(cfg)
     return _train_classification(cfg)
 
 
@@ -803,6 +807,44 @@ def _train_tracking(cfg: dict) -> str:
 
     return _fit(cfg, pre, codec, analyzer, train_loader, val_loader, prep,
                 tag="tracking", n_train=len(train_ds))
+
+
+def _train_detection(cfg: dict) -> str:
+    """Single-frame detection: images through the codec as All-Intra content.
+
+    The AR recipe trains on 16-frame clips whose bit savings come largely from
+    the temporal module; on images that module has nothing to do, so this path
+    exists to learn an edit that pays for itself at T=1. mAP is evaluated by
+    ops/probe_detection.py (the same 3-arm protocol), not inside the engine —
+    the training loop only needs a differentiable L_Acc, which the frozen
+    detector supplies.
+    """
+    device = _device(cfg)
+    pre, codec, analyzer = _build_models(cfg, device)
+    tr, d = cfg["train"], cfg["data"]
+    common = dict(index_json=d["index"], frame_size=d.get("frame_size", 320))
+    train_ds = CocoDetDataset(split="train", train=True,
+                              max_items=d.get("max_train_items"), **common)
+    val_ds = CocoDetDataset(split="val", train=False,
+                            max_items=d.get("max_val_items"), **common)
+    train_loader = DataLoader(
+        train_ds, batch_size=tr.get("batch_size", 4), shuffle=True,
+        num_workers=tr.get("num_workers", 2), collate_fn=collate_coco_det,
+        drop_last=True, pin_memory=(device.type == "cuda"),
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=tr.get("batch_size", 4), shuffle=False,
+        num_workers=tr.get("num_workers", 2), collate_fn=collate_coco_det,
+    ) if len(val_ds) else None
+
+    def prep(batch):
+        clips, targets = batch
+        clips = clips.to(device, non_blocking=True)
+        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+        return clips, targets
+
+    return _fit(cfg, pre, codec, analyzer, train_loader, val_loader, prep,
+                tag="object_detection", n_train=len(train_ds))
 
 
 # --------------------------------------------------------------------------

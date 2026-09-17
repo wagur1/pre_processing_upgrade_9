@@ -73,6 +73,14 @@ def build_task(cfg: dict, backbone: str | None = None) -> TaskAnalyzer:
             search_size=cfg["task"].get("search_size", 255),
             pos_radius=cfg["task"].get("pos_radius", 2.0),
         ).freeze()
+    if name == "object_detection":
+        from .object_detection import ObjectDetectionAnalyzer
+        return ObjectDetectionAnalyzer(
+            backbone=backbone or cfg["task"].get("backbone",
+                                                 "fasterrcnn_resnet50_fpn"),
+            score_thresh=cfg["task"].get("score_thresh", 0.05),
+            size=cfg["task"].get("image_size", 320),
+        ).freeze()
     raise ValueError(f"unknown task '{name}'")
 
 
