@@ -717,6 +717,14 @@ def _fit(cfg, pre, codec, analyzer, train_loader, val_loader, prep_batch,
 
         _save(last_path, epoch + 1)
         if val_loader is None:
+            # Worth shouting about: with no validation there is no checkpoint
+            # selection and no early stopping, so `preprocessor.pth` is just the
+            # last epoch and patience does nothing. That is exactly how a 12 h
+            # run produced best_val=inf without anyone noticing.
+            if epoch == start_epoch:
+                print("[train] WARNING: no validation loader -> no model selection "
+                      "and no early stopping; preprocessor.pth will be the LAST "
+                      "epoch. Check that the val split is non-empty.", flush=True)
             _save(ckpt_path, epoch + 1)            # no val -> last is best
         else:
             vl = _val_loss(pre, codec, analyzer, val_loader, weights, qp_list,

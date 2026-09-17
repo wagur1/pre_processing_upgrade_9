@@ -70,10 +70,19 @@ va = build_coco_index(os.environ["VAL_DIR"], os.environ["VAL_ANN"],
                       "/tmp/idx_va.json", n_train=0,
                       n_val=int(os.environ["N_VAL"]))
 a = json.load(open("/tmp/idx_tr.json")); b = json.load(open("/tmp/idx_va.json"))
-json.dump({"meta": {"train_ann": os.environ["TRAIN_ANN"]},
-           "train": a["train"], "val": b["train"], "test": b["val"]},
+# b was built with n_train=0, so its images live in b["val"]/b["test"] — reading
+# b["train"] here produced an EMPTY val split, which silently disabled both
+# validation and early stopping (best_val stayed inf, the checkpoint was never
+# selected) for a 12 h run. Assert the sizes instead of trusting the naming.
+splits = {"train": a["train"], "val": b["val"], "test": b["test"]}
+for name, recs in splits.items():
+    if not recs:
+        raise SystemExit(f"[dettrain] FATAL: split '{name}' is empty — check the "
+                         f"index construction before spending GPU hours")
+json.dump({"meta": {"train_ann": os.environ["TRAIN_ANN"]}, **splits},
           open("data/index/coco_det.json", "w"))
-print(f"[dettrain] index train={len(a['train'])} val={len(b['train'])}")
+print(f"[dettrain] index train={len(splits['train'])} val={len(splits['val'])} "
+      f"test={len(splits['test'])}")
 PY
 fi
 python -c "import json;d=json.load(open('$INDEX'));print('[dettrain] index sizes', {k: len(v) for k,v in d.items() if isinstance(v, list)})"
