@@ -70,6 +70,19 @@ ls -la outputs/probe_detection || true
 """
 
 
+MODEL_CALL = """python ops/probe_detection.py \\
+    --images "$VAL" --ann "$ANN" --ckpt "$CKPT" \\
+    --config configs/sandwich_ar.yaml \\
+    --n-images __N_IMAGES__ --size __SIZE__ --stage-a-sizes __STAGE_A_SIZES__ \\
+    --qps __QPS__ --bootstrap __BOOTSTRAP__ --stage both --records \\
+    --out outputs/probe_detection"""
+
+SIMPLE_CALL = """python __SCRIPT__ \\
+    --images "$VAL" --ann "$ANN" \\
+    --n-images __N_IMAGES__ --size __SIZE__ --qps __QPS__ __EXTRA_ARGS__ \\
+    --out outputs/probe_bgsuppress"""
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--commit", required=True)
@@ -95,7 +108,7 @@ def main() -> None:
 
     src = BASH.replace("__COMMIT__", a.commit)
     is_model_probe = a.script.endswith("probe_detection.py")
-    src = src.replace("__INVOKE__", model_call if is_model_probe else simple_call)
+    src = src.replace("__INVOKE__", MODEL_CALL if is_model_probe else SIMPLE_CALL)
     src = src.replace("__SCRIPT__", a.script).replace("__EXTRA_ARGS__", a.extra_args)
     src = src.replace("__N_IMAGES__", str(a.n_images))
     src = src.replace("__SIZE__", str(a.size))
